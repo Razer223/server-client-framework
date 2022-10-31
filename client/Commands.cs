@@ -54,6 +54,7 @@ namespace ClientFramework {
 
             Network.NetworkMessage message = new Network.NetworkMessage {
                 Parameters = Network.SerializeParameters(data),
+                ParametersNew = data,
                 MethodName = "test",
                 TargetId = Int32.Parse(target)
             };

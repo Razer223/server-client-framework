@@ -47,7 +47,8 @@ namespace ClientFramework {
 			public string? MethodName { get; set; }
 			public List<object>? Parameters { get; set; } = new List<object>() {};
 			// Array of parameters passed to method that is going to be executed
-			public dynamic? ReturnDataClass { get; set; }
+			public dynamic? ParametersNew { get; set; }
+			public string? ParametersType { get; set; }
 			public int Key { get; set; } = new Random().Next(100,int.MaxValue);
 			// Key for getting the response for specific request
 			public int? Sender { get; set; } = Client.Id;
@@ -62,7 +63,7 @@ namespace ClientFramework {
 
 
 		public static bool HandshakeDone { get; set; }
-		public static ClientBase Client = default!;
+		public static ClientBase? Client;
 
 
 		public class ClientBase : TcpClient {
@@ -90,13 +91,11 @@ namespace ClientFramework {
 		//!! METHODS !!//
 
 		public static void Connect(string ip = "127.0.0.1", int port = 2302, string userName = "unknown") {
-			if (Client.Connected)
+
+			if (Client != null && Client.Connected)
 				throw new Exception("Already connected to server!");
 
-			// Reset variables (Just to be sure)
-
 			Client = new ClientBase();
-
 
 			Console.WriteLine("Trying to connect at: (" + ip + ":" + port.ToString() + "), with name: " + userName);
 			Client.Connect(IPAddress.Parse(ip), port);
@@ -136,6 +135,7 @@ namespace ClientFramework {
 				while (Client.Connected) {
 					byte[] bytes = ReadMessageBytes(Client.GetStream());
 					if (bytes.Count() == 0) {
+						Client.Close();
 						throw new Exception("ERROR BYTES!");
 					}
 					
@@ -163,7 +163,7 @@ namespace ClientFramework {
 
 					// Dump result to array and continue
 					if (message.MessageType == (int)MessageTypes.ResponseData) {
-						Results.Add(message.Key,message.ReturnDataClass);
+						Results.Add(message.Key,message.ParametersNew);
 						//Results.Add(message.Key,deserialisedParams);
 						continue;
 					}
@@ -248,12 +248,10 @@ namespace ClientFramework {
 		// Fire and forget
 		public static void SendData(NetworkMessage message) {
             if (!Client.HandshakeDone) throw new Exception("Not connected to server");
-			if (message.TargetId == Client.Id) throw new Exception("Cannot send data to self! (client)");
-			
+			if (message.TargetId == Client.Id) throw new Exception("Cannot send data to self! (client)");	
 			if (message.MessageType == null) message.MessageType = (int?)MessageTypes.SendData;
 
 			DebugMessage(message,1);
-
 			SendMessage(message,Client.GetStream());
         }
 
@@ -272,19 +270,7 @@ namespace ClientFramework {
 			Stream.Read(bytes,0,msgLenght);
 			return bytes;
 		}
-
-		public static dynamic RequestData<T>(NetworkMessage message) {
-			if (!Client.HandshakeDone) throw new Exception("Not connected to server");
-
-			message.MessageType = (int?)MessageTypes.RequestData;
-			//message.ReturnDataType = typeof(T).GetType();
-			DebugMessage(message,1);
-
-			// Send request
-			SendMessage(message,Client.GetStream());
-
-			
-			// Wait for response
+		public static dynamic RequestDataResult(NetworkMessage message) {
 			dynamic returnMessage;
 			short timer = 0;
 			while (true) {
@@ -294,16 +280,47 @@ namespace ClientFramework {
 					Results.Remove(message.Key);
 					break;
 				}
-				
 				if (timer > 100) throw new Exception($"Request {message.Key} ({message.MethodName}) timed out!");
 				timer++;
 			}
+			return returnMessage;
+		}
+		public static dynamic RequestData(NetworkMessage message) {
+			if (!Client.HandshakeDone) throw new Exception("Not connected to server");
+			message.MessageType = (int?)MessageTypes.RequestData;
+			DebugMessage(message,1);
+			SendMessage(message,Client.GetStream());
+			dynamic returnMessage = RequestDataResult(message);
+			return returnMessage;
+		}
+		public static dynamic RequestData<T>(NetworkMessage message) {
+			if (!Client.HandshakeDone) throw new Exception("Not connected to server");
+			message.MessageType = (int?)MessageTypes.RequestData;
+			DebugMessage(message,1);
+			SendMessage(message,Client.GetStream());
+			dynamic returnMessage = RequestDataResult(message);
 			if (returnMessage is JsonElement) {
 				return ((JsonElement)returnMessage).Deserialize<T>();
 			}
 			return (T)returnMessage;
 		}
-		
+		public static T DeserializeJsonelement<T>(dynamic data) {
+			return default;
+		}
+		public static object[] ParseJsonElementArray(dynamic data) {
+			List<object> returnData = new List<object>();
+			foreach (object _data in data) {
+				JsonElement element = (JsonElement)_data;
+				var json = element.GetRawText();
+				returnData.Add(JsonSerializer.Deserialize<object>(json));
+			}
+			return returnData.ToArray();
+		}
+		public static T ParseJsonElement<T>(dynamic data) {
+			JsonElement element = (JsonElement)data;
+			var json = element.GetRawText();
+			return JsonSerializer.Deserialize<T>(json);
+		}
 		public static int Handshake(string userName) {
 			int version = Program.Version;
 			Console.WriteLine($"Starting HANDSHAKE with server, with version {version}");
@@ -328,9 +345,20 @@ namespace ClientFramework {
 			var utf8Reader = new Utf8JsonReader(bytes);
 			NetworkMessage? returnMessage = JsonSerializer.Deserialize<NetworkMessage>(ref utf8Reader)!;
 
-			object[] returnedParams = DeserializeParameters(returnMessage.Parameters);
 
-			int _clientID = (int)returnedParams[0];
+			//object[] returnedParams = DeserializeParameters(returnMessage.Parameters);
+			// ((JsonElement)returnMessage).Deserialize<T>();
+			//object[] returnedParams = returnMessage.ParametersNew;
+			Console.WriteLine(((JsonElement)returnMessage.ParametersNew));
+			Console.WriteLine(returnMessage.ParametersType);
+
+			Type type = Type.GetType(returnMessage.ParametersType);
+
+			object[] returnedParams = ((JsonElement)returnMessage.ParametersNew).Deserialize<object[]>();
+			
+
+			int _clientID = ParseJsonElement<int>(returnedParams[0]);
+			Console.WriteLine(_clientID);
 			if (_clientID < 0) {
 				if (_clientID == -2) throw new Exception("Version mismatch!");
 				if (_clientID == -3) throw new Exception("Username already in use!");
@@ -398,7 +426,7 @@ namespace ClientFramework {
             Console.WriteLine($"TYPE: {type}");
 			Console.WriteLine($"TIME: {DateTime.Now.Millisecond}");
             Console.WriteLine($"MessageType:{message.MessageType}");
-			Console.WriteLine($"ReturnData: {message.ReturnDataClass}");
+			Console.WriteLine($"ParametersNew: {message.ParametersNew}");
             Console.WriteLine($"TargetId:{message.TargetId}");
             Console.WriteLine($"MethodName:{message.MethodName}");
             if (message.Parameters != null) {

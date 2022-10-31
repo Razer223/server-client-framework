@@ -14,6 +14,11 @@ using System.Text.Json;
 using System.Threading;
 
 namespace ServerFramework {
+    public class ParameterClass {
+        public int Sender { get; set; }
+        public NetworkClient? Client;
+        public dynamic? Data { get; set; }
+    }
 
     public class Network {
         public static int ClientID = 1;
@@ -33,8 +38,8 @@ namespace ServerFramework {
             public dynamic? EventDataClass { get; set; }
 
         }
-		public class NetworkMessage
-		{
+        
+		public class NetworkMessage {
 			public int? MessageType { get; set; } = 0;
 			// One of the tpes in "MessageTypes"
 			public int? TargetId { get; set; } = 0;
@@ -42,6 +47,8 @@ namespace ServerFramework {
             public string? MethodName { get; set; }
 			// Minus numbers are for internal use!
 			public List<object>? Parameters { get; set; } = new List<object>() {};
+            public dynamic? ParametersNew { get; set; }
+            public string? ParametersType { get; set; }
             public dynamic? ReturnDataClass { get; set; }
 			// Array of parameters passed to method that is going to be executed
 			public int Key { get; set; } = new Random().Next(100,int.MaxValue);
@@ -160,7 +167,7 @@ namespace ServerFramework {
 			
 			if (message.MessageType == null) message.MessageType = (int?)MessageTypes.SendData;
             
-
+            message.ParametersType = message.ParametersNew.GetType().ToString();
             
             // Send to single ro multiple users
             if (message.TargetId > 0) {
@@ -176,33 +183,50 @@ namespace ServerFramework {
             }
         }
         
-
-        public static dynamic RequestData(NetworkMessage message) {
-			if (!ServerRunning) throw new Exception("Not connected to server");
-			
-			message.MessageType = (int?)MessageTypes.RequestData;
-
-            NetworkClient client = ClientList.FirstOrDefault(client => client.ID == message.TargetId);
-            if (client == default) throw new Exception("Invalid target!");
-
-            SendMessage(message,client.Stream);
-			
-			// Wait for response
-			object[] returnData;
+        public static dynamic RequestDataResult(NetworkMessage message) {
+			dynamic returnMessage;
 			short timer = 0;
 			while (true) {
 				Thread.Sleep(1);
 				if (Results.ContainsKey(message.Key)) {
-					returnData = (Results.First(n => n.Key == message.Key)).Value; // Just in case if the index changes in between
+					returnMessage = (Results.First(n => n.Key == message.Key)).Value; // Just in case if the index changes in between
 					Results.Remove(message.Key);
 					break;
 				}
 				if (timer > 100) throw new Exception($"Request {message.Key} ({message.MethodName}) timed out!");
 				timer++;
 			}
-			return returnData;
+			return returnMessage;
 		}
+		public static dynamic RequestData(NetworkMessage message) {
+			if (!ServerRunning) throw new Exception("Server Not running!");
+			message.MessageType = (int?)MessageTypes.RequestData;
 
+            NetworkClient client = ClientList.FirstOrDefault(client => client.ID == message.TargetId);
+            if (client == default) throw new Exception("Invalid target!");
+
+			DebugMessage(message,1);
+			SendMessage(message,client.Stream);
+
+			dynamic returnMessage = RequestDataResult(message);
+			return returnMessage;
+		}
+		public static dynamic RequestData<T>(NetworkMessage message) {
+			if (!ServerRunning) throw new Exception("Server Not running!");
+			message.MessageType = (int?)MessageTypes.RequestData;
+
+            NetworkClient client = ClientList.FirstOrDefault(client => client.ID == message.TargetId);
+            if (client == default) throw new Exception("Invalid target!");
+            
+			DebugMessage(message,1);
+			SendMessage(message,client.Stream);
+
+			dynamic returnMessage = RequestDataResult(message);
+			if (returnMessage is JsonElement) {
+				return ((JsonElement)returnMessage).Deserialize<T>();
+			}
+			return (T)returnMessage;
+		}
 
         // One thread for one user
         // Start listening data coming from this client
@@ -239,31 +263,20 @@ namespace ServerFramework {
 
                     // HANDLE HANDSHAKE
                     if (message.isHandshake && message.MethodName == default) {
-                        object[] data = Handshake(_client, (int)deserialisedParams[0], (string)deserialisedParams[1]);
-                        //object data = typeof(Network).GetMethod("Handshake").Invoke("Handshake",parameters);
-                        NetworkMessage handshakeMessage = new NetworkMessage {
-                            MessageType = (int)MessageTypes.ResponseData,
-                            MethodName = message.MethodName
-                        };
-                        if (data != null) handshakeMessage.Parameters = SerializeParameters(data);
-                        handshakeMessage.TargetId = Int32.Parse(data[0].ToString());
-                        Network.SendData(handshakeMessage);
-                        Console.WriteLine($"*SUCCESS* Handshake done! ({_client.ID})");
+                        ClientHandshake(_client, (int)deserialisedParams[0], (string)deserialisedParams[1]);
                         continue;
                     }
 
 
+                    Console.WriteLine("#1");
 
                     // DESERIALISE PARAMETERS AND ADD CLIENT AS FIRST PARAMETER
-                    List<object> paramList = new List<object>();
-                    paramList.Add(_client);
-                    if (message.Parameters != null) {
-                        foreach (object p in deserialisedParams) {
-                            paramList.Add(p);
-                        }
-                    }
-                    object[] parameters = paramList.ToArray();
-
+                    ParameterClass parameters = new ParameterClass();
+                    parameters.Sender = _client.ID;
+                    parameters.Client = _client;
+                    //parameters.Data = message.ParametersNew.Data.ToString();
+                    
+                    Console.WriteLine("#2");
                 
                     // FORWARD DATA IF NOT MENT FOR SERVER (+forget)
                     if (message.TargetId != 1) {
@@ -315,7 +328,7 @@ namespace ServerFramework {
                                     Key = message.Key
                                 };
                                 // HANDLE ON SERVER
-                                object? data = methodInfo?.Invoke(methodName,parameters);
+                                object? data = methodInfo?.Invoke(methodName,new object[] {parameters});
                                 if (data != null && !(data.GetType().IsClass)) {
                                     responseMessage.Parameters = SerializeParameters(data);
                                 } else {
@@ -328,7 +341,8 @@ namespace ServerFramework {
 						
 						// FIRE AND FORGET (Dont return method return data)
 						case (int)MessageTypes.SendData:
-							methodInfo?.Invoke(methodName,parameters);
+                            Console.WriteLine(parameters);
+							methodInfo?.Invoke(methodName,new object[] {parameters});
 							break;
 						default:
 							throw new NotImplementedException();
@@ -355,18 +369,26 @@ namespace ServerFramework {
             _client.Close();
         }
 
-        public static object[] Handshake(NetworkClient client, int version, string userName) {
+        public static void ClientHandshake(NetworkClient client, int version, string userName) {
             
             // RETURNS client id if success (minus number if error (each value is one type of error))
             Console.WriteLine($"*HANDSHAKE START* Version:{version} Name:{userName}");
             client.UserName = userName;
+
+            NetworkMessage handshakeMessage = new NetworkMessage {
+                MessageType = (int)MessageTypes.ResponseData,
+                isHandshake = true,
+                TargetId = client.ID,
+                ParametersNew = new object[] {client.ID}
+            };
 
             object[] returnData = new object[] {client.ID};
 
             //TODO add major and minor checking
             if (version != Program.Version) {
                 Console.WriteLine($"User {userName} has wrong version! Should be: {Program.Version} has: {version}");
-                return returnData;
+                Network.SendData(handshakeMessage);
+                return;
             }
 
             List<object[]> clientlist = new List<object[]>(){};
@@ -374,6 +396,7 @@ namespace ServerFramework {
                 if (!toAdd.Connected || toAdd.ID == client.ID) continue;
                 clientlist.Add(new object[] {toAdd.ID,toAdd.UserName});
             }
+            handshakeMessage.ParametersNew = new object[] {client.ID,ClientMethods.ToArray(),clientlist.ToArray()};
 
             // TODO move elsewhere
             List<int> targetList = new List<int>() {};
@@ -388,8 +411,8 @@ namespace ServerFramework {
             };
             SendEvent(message);
 
-            returnData = new object[] {client.ID,ClientMethods.ToArray(),clientlist.ToArray()};
-            return returnData;
+            Network.SendData(handshakeMessage);
+            Console.WriteLine($"*SUCCESS* Handshake done! ({client.ID})");
         }
 
 
@@ -434,6 +457,7 @@ namespace ServerFramework {
             Console.WriteLine($"TIME: {DateTime.Now.Millisecond}");
             Console.WriteLine($"MessageType:{message.MessageType}");
             Console.WriteLine($"ReturnData: {message.ReturnDataClass}");
+            Console.WriteLine($"ParametersNew: {message.ParametersNew}");
             Console.WriteLine($"TargetId:{message.TargetId}");
             Console.WriteLine($"MethodName:{message.MethodName}");
             if (message.Parameters != null) {
